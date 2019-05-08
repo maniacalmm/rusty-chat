@@ -12,6 +12,7 @@ fn handle_client(stream: &mut TcpStream) {
 }
 
 fn main() -> io::Result<()> {
+    println!("starting server on 8080");
     let listener = TcpListener::bind("0.0.0.0:8080")?;
     for stream in listener.incoming() {
         handle_client(&mut stream?);

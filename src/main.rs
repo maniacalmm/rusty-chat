@@ -10,12 +10,13 @@ use std::env;
 use std::vec::*;
 use bytes::{BytesMut, BufMut};
 use std::ops::Add;
+use std::thread;
 
 static STR_DELIMITER: &'static str = "\r\n";
 
-fn handle_client(stream: &mut TcpStream) {
+fn handle_client(mut stream: TcpStream) {
     let mut buf: [u8; 1024] = [0; 1024];
-    let mut byteMut = BytesMut::with_capacity(1024);
+    println!("incoming: {:?}", &stream);
     loop {
         let read_size = stream.read(&mut buf).unwrap();
         println!("read_size: {}", read_size);
@@ -44,7 +45,9 @@ fn main() -> io::Result<()> {
     println!("starting server on {}", port);
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
     for stream in listener.incoming() {
-        handle_client(&mut stream?);
+        thread::spawn(move || {
+            handle_client(stream.unwrap());
+        });
     }
     Ok(())
 }

@@ -12,7 +12,29 @@ use bytes::{BytesMut, BufMut};
 use std::ops::Add;
 use std::thread;
 
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+
+use std::sync::mpsc::{self, Receiver, Sender};
+
+type RX = Receiver<String>;
+type TX = Sender<String>;
+
 static STR_DELIMITER: &'static str = "\r\n";
+
+struct SharedChat {
+    // all other people in this shared chat
+    peers: HashMap<SocketAddr, TX>,
+}
+
+impl SharedChat {
+    pub fn new() -> Self {
+        SharedChat {
+            peers: HashMap::new(),
+        }
+    }
+}
 
 fn handle_client(mut stream: TcpStream) {
     let mut buf: [u8; 1024] = [0; 1024];
@@ -29,13 +51,22 @@ fn handle_client(mut stream: TcpStream) {
 
         match &whole_content_wo_delimiter[..]  {
             ":q" => break,
-            _ => {
+            _    => {
                 let output = whole_content_wo_delimiter.add(" ((right back at ya\n");
                 stream.write(output.as_bytes());
             }
         }
 
     }
+}
+
+// to represent a connected client
+struct Client {
+    name: String,
+    chat: String,
+    shared_chat: Arc<Mutex<SharedChat>>,
+    rx: RX,
+    addr: SocketAddr,
 }
 
 fn main() -> io::Result<()> {

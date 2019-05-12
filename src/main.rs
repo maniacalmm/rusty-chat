@@ -31,28 +31,22 @@ struct Message {
 
 impl Message {
     pub fn new(from: SocketAddr, message: String) -> Self {
-        Message {
-            from,
-            message,
-        }
+        Message { from, message }
     }
 }
 
 struct ChatRoom {
-    // all other people in this shared chat, with their addr & tx back to this chat room
+    // all other people in this shared chat, with their addr, tx is so chat room can talk to each of them
     peers: HashMap<SocketAddr, TX>,
     // inbox of all connected client
     inbox: RX,
-    // broadcast to all peers in this chat room
-    broadcaster: TX,
 }
 
 impl ChatRoom {
-    pub fn new(inbox: RX, broadcaster: TX) -> Self {
+    pub fn new(inbox: RX) -> Self {
         ChatRoom {
             peers: HashMap::new(),
             inbox,
-            broadcaster,
         }
     }
 
@@ -60,43 +54,49 @@ impl ChatRoom {
         self.peers.insert(addr, tx);
     }
 
-
     // receive message and broadcast to all peers
     fn broadcast(&mut self) {
-        let message = self.rx.recv().unwrap();
-
-        for (addr, tx) in &self.peers {
-            // don't send the message to oneself
-            if message.from != addr {
-//             tx.send(message.clone());
-                println!("message: {:?}, to: {}", &message, addr);
+        if let Ok(message) = self.inbox.try_recv() {
+            for (addr, tx) in &self.peers {
+                println!("broadcast message: {:?}, to: {}", &message, addr);
+                if (&message.from).ne(addr) {
+                    tx.send(message.clone());
+                }
             }
         }
     }
 }
 
-fn handle_client(mut client: Client) {
+fn handle_client(mut client: Client, inbox: Receiver<Message>) {
     let mut buf: [u8; 1024] = [0; 1024];
     println!("incoming: {:?}", &client.stream);
+
+    let mut inbox_stream = client.stream.try_clone().unwrap();
+    thread::spawn(move || {
+        loop {
+            println!("inbox try recv");
+            if let Ok(message) = inbox.recv() {
+//                println!("client inbox received: {:?}", message);
+                inbox_stream.write(message.message.as_bytes());
+            }
+        }
+    });
+
     loop {
         println!("about to read...");
         let read_size = client.stream.read(&mut buf).unwrap();
-        println!("read_size: {}", read_size);
         let mut buf_vec: Vec<u8> = buf.to_vec();
         buf_vec.drain(read_size..buf.len());
 
         let whole_content: String = String::from_utf8(buf_vec).unwrap();
         let idx = whole_content.find(STR_DELIMITER).unwrap();
-        let whole_content_wo_delimiter = whole_content[..idx].to_owned();
+        let whole_content_wo_delimiter = whole_content[..idx].to_owned().add("\n");
 
         match &whole_content_wo_delimiter[..] {
             ":q" => break,
             _ => {
-                // let output = whole_content_wo_delimiter.add(" ((right back at ya\n");
-                // stream.write(output.as_bytes());
                 // write content to chatting room first
                 // lock here is inevitable, since every client need to modify the channel somehow, so
-                let chat_room = client.chat_room.lock().unwrap();
                 println!(" ---- send data to chat room ----");
                 let message = Message::new(client.addr, whole_content_wo_delimiter);
                 client.send_to_chat_room(message);
@@ -107,22 +107,18 @@ fn handle_client(mut client: Client) {
 
 // to represent a connected client
 struct Client {
-    // name: String,
-    // chat: String,
-    // message to chat_room is handled by this?
-//    chat_room: Arc<Mutex<ChatRoom>>,
     to_chat_room: TX,
-    inbox: RX,
+//    inbox: RX,
     stream: TcpStream,
     addr: SocketAddr,
 }
 
 impl Client {
-    pub fn new(to_chat_room: TX, inbox: RX, stream: TcpStream) -> Self {
+    pub fn new(to_chat_room: TX, stream: TcpStream) -> Self {
         let addr = stream.peer_addr().unwrap();
         Client {
             to_chat_room,
-            inbox,
+//            inbox,
             stream,
             addr,
         }
@@ -136,10 +132,10 @@ impl Client {
 // for chat room to receive messages
 fn chat_room_broadcasting(chat_room: Arc<Mutex<ChatRoom>>) {
     thread::spawn(move || {
-        // every boardcast also need to lock the chat_room?
+        // every broadcast also need to lock the chat_room?
         // is this optimum
         loop {
-            println!("incoming message: {:?}", rx.recv().unwrap());
+            chat_room.lock().unwrap().broadcast();
         }
     });
 }
@@ -151,21 +147,28 @@ fn main() -> io::Result<()> {
     // this represents the only chat room we have now
     let (tx, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel();
     let chat_room = Arc::new(Mutex::new(ChatRoom::new(rx)));
+    let chat_room_broadcast_ref = Arc::clone(&chat_room);
 
     thread::spawn(move || {
-        chat_room_receive_message(rx);
+        chat_room_broadcasting(chat_room_broadcast_ref);
     });
 
     println!("starting server on {}", port);
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
     for stream in listener.incoming() {
+        let (tx_private, rx_private): (Sender<Message>, Receiver<Message>) = mpsc::channel();
+
         let chat_room_ref: Arc<Mutex<ChatRoom>> = Arc::clone(&chat_room);
-        let client = Client::new(chat_room_ref, stream.unwrap(), );
+        let client = Client::new(tx.clone(), stream.unwrap());
         // add client to chat_room
-        chat_room.lock().unwrap().add_client(client.addr, tx.clone());
+        chat_room_ref
+            .lock()
+            .unwrap()
+            .add_client(client.addr, tx_private);
         thread::spawn(move || {
-            handle_client(client);
+            handle_client(client, rx_private);
         });
+        println!("spawned new thread for new client");
     }
     Ok(())
 }

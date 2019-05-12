@@ -18,6 +18,21 @@ use std::sync::{Arc, Mutex};
 
 use std::sync::mpsc::{self, Receiver, Sender};
 
+/// basic idea:
+/// three main construct:
+/// 1, chat_room -> stores all the user, and the tx channel to them
+/// 2, client -> represent each connection, contains a tx channel to chat_room
+/// 3, message -> indicate who sends the message, and the content of message
+///
+/// basic work flow:
+/// -> user make the connection
+/// -> we add this user to chat_room
+/// -> user contain a tx to the chat_room
+/// -> each user has two thread for detecting reading(it's blocking, that why we need a different thread) and writing.
+/// -> each chat_room is a separate thread for detecting incoming message and broadcasting it to all the user
+///
+/// chat_room is a Arc<Mutex<ChatRoom>> since there are multiple thread writing and reading to it, which is not performant
+
 type RX = Receiver<Message>;
 type TX = Sender<Message>;
 
@@ -173,10 +188,3 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-// each client has a list of TX to different chat room (or just one for now)
-// each client has its own writing & reading thread
-// when client try to write to chat room, it picks the suitable TX
-
-// for each chat_room, there should be a separate thread checking the incoming message
-// chat_room should maintain a list of peers it has
-// once the message is received, start the broadcast to these different client

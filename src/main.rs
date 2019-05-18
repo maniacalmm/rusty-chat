@@ -13,6 +13,7 @@ use std::time::SystemTime;
 use std::vec::*;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -42,17 +43,19 @@ static STR_DELIMITER: &'static str = "\r\n";
 struct Message {
     from: SocketAddr,
     message: String,
+    name: String,
 }
 
 impl Message {
-    pub fn new(from: SocketAddr, message: String) -> Self {
-        Message { from, message }
+    pub fn new(from: SocketAddr, message: String, name: String) -> Self {
+        Message { from, message, name }
     }
 }
 
 struct ChatRoom {
     // all other people in this shared chat, with their addr, tx is so chat room can talk to each of them
     peers: HashMap<SocketAddr, TX>,
+    usernames: HashSet<String>,
     // inbox of all connected client
     inbox: RX,
 }
@@ -61,6 +64,7 @@ impl ChatRoom {
     pub fn new(inbox: RX) -> Self {
         ChatRoom {
             peers: HashMap::new(),
+            usernames: HashSet::new(),
             inbox,
         }
     }
@@ -113,7 +117,7 @@ fn handle_client(mut client: Client, inbox: Receiver<Message>) {
                 // write content to chatting room first
                 // lock here is inevitable, since every client need to modify the channel somehow, so
                 println!(" ---- send data to chat room ----");
-                let message = Message::new(client.addr, whole_content_wo_delimiter);
+                let message = Message::new(client.addr, whole_content_wo_delimiter, client.name.clone());
                 client.send_to_chat_room(message);
             }
         }
@@ -126,16 +130,18 @@ struct Client {
 //    inbox: RX,
     stream: TcpStream,
     addr: SocketAddr,
+    name: String,
 }
 
 impl Client {
-    pub fn new(to_chat_room: TX, stream: TcpStream) -> Self {
+    pub fn new(to_chat_room: TX, stream: TcpStream, name: String) -> Self {
         let addr = stream.peer_addr().unwrap();
         Client {
             to_chat_room,
 //            inbox,
             stream,
             addr,
+            name,
         }
     }
 
@@ -155,12 +161,42 @@ fn chat_room_broadcasting(chat_room: Arc<Mutex<ChatRoom>>) {
     });
 }
 
+// check if the username picked by user is unique in this chat_room
+fn check_unique_username(stream: &mut TcpStream, chat_room: &Arc<Mutex<ChatRoom>>) -> Option<String> {
+    let mut buf: [u8; 20] = [0; 20];
+    loop {
+        if let Ok(x) = stream.read(&mut buf) {
+            if x > 0 {
+                break;
+            }
+        }
+    }
+
+    let nl_idx = buf.iter().position(|x| *x == 0 as u8).unwrap();
+    let (line, _) = buf.split_at(nl_idx);
+
+    // let (line, _) = buf.split_at(buf.posi)
+    let name: String = String::from_utf8_lossy(line).trim().to_owned();
+
+    let mut chat_room = chat_room.lock().unwrap();
+    println!("usernames: {:?}", &chat_room.usernames);
+    if chat_room.usernames.contains(&name) {
+        stream.write(&[0]).unwrap();
+        None
+    } else {
+        chat_room.usernames.insert(name.clone());
+        stream.write(&[1]).unwrap();
+        Some(name)
+    }
+}
+
 // the thing is that, this entire server revolves on shared struct, which is chat_room
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     let port = args.get(0).unwrap();
     // this represents the only chat room we have now
     let (tx, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel();
+    // this is the only chatroom we have now
     let chat_room = Arc::new(Mutex::new(ChatRoom::new(rx)));
     let chat_room_broadcast_ref = Arc::clone(&chat_room);
 
@@ -170,20 +206,37 @@ fn main() -> io::Result<()> {
 
     println!("starting server on {}", port);
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
+
     for stream in listener.incoming() {
         let (tx_private, rx_private): (Sender<Message>, Receiver<Message>) = mpsc::channel();
 
         let chat_room_ref: Arc<Mutex<ChatRoom>> = Arc::clone(&chat_room);
-        let client = Client::new(tx.clone(), stream.unwrap());
-        // add client to chat_room
-        chat_room_ref
-            .lock()
-            .unwrap()
-            .add_client(client.addr, tx_private);
+
+        let tx_clone = tx.clone(); 
+        // checking the username and waiting for user to retry could block the thread
+        // more heavily than imagine, spawn a new thread for this
         thread::spawn(move || {
-            handle_client(client, rx_private);
+            let mut stream = stream.unwrap();
+            let mut client;
+            // check username and store and so on
+            loop {
+                println!("checking unique username");
+                if let Some(username) = check_unique_username(&mut stream, &chat_room_ref) {
+                    client = Client::new(tx_clone, stream, username);
+                    break;
+                }
+            }
+            
+            // add client to chat_room
+            chat_room_ref
+                .lock()
+                .unwrap()
+                .add_client(client.addr, tx_private);
+            thread::spawn(move || {
+                handle_client(client, rx_private);
+            });
+            println!("spawned new thread for new client");
         });
-        println!("spawned new thread for new client");
     }
     Ok(())
 }

@@ -37,7 +37,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 type RX = Receiver<Message>;
 type TX = Sender<Message>;
 
-static STR_DELIMITER: &'static str = "\r\n";
+// client side is read_line, delimiter is by default now \n
+static STR_DELIMITER: &'static str = "\n";
 
 #[derive(Clone, Debug)]
 struct Message {
@@ -77,9 +78,8 @@ impl ChatRoom {
     fn broadcast(&mut self) {
         if let Ok(message) = self.inbox.try_recv() {
             for (addr, tx) in &self.peers {
-                println!("broadcast message: {:?}, to: {}", &message, addr);
                 if (&message.from).ne(addr) {
-                    tx.send(message.clone());
+                    tx.send(message.clone()).unwrap();
                 }
             }
         }
@@ -88,26 +88,31 @@ impl ChatRoom {
 
 fn handle_client(mut client: Client, inbox: Receiver<Message>) {
     let mut buf: [u8; 1024] = [0; 1024];
-    println!("incoming: {:?}", &client.stream);
+    println!("handle client: {:?}", &client);
 
     let mut inbox_stream = client.stream.try_clone().unwrap();
+    // thread to handle receving message from chat_room 
     thread::spawn(move || {
         loop {
             println!("inbox try recv");
             if let Ok(message) = inbox.recv() {
-//                println!("client inbox received: {:?}", message);
-                inbox_stream.write(message.message.as_bytes());
+                let name = message.name;
+                let msg = message.message;
+                let full: String = format!("{}: {}", name, msg);
+                inbox_stream.write(full.as_bytes()).unwrap();
             }
         }
     });
 
+    // this one is looping to wait message from client
     loop {
-        println!("about to read...");
         let read_size = client.stream.read(&mut buf).unwrap();
         let mut buf_vec: Vec<u8> = buf.to_vec();
         buf_vec.drain(read_size..buf.len());
 
         let whole_content: String = String::from_utf8(buf_vec).unwrap();
+        println!("{:?} incoming: {}", &client.name, &whole_content);
+        println!("{:?}", &whole_content.as_bytes());
         let idx = whole_content.find(STR_DELIMITER).unwrap();
         let whole_content_wo_delimiter = whole_content[..idx].to_owned().add("\n");
 
@@ -125,6 +130,7 @@ fn handle_client(mut client: Client, inbox: Receiver<Message>) {
 }
 
 // to represent a connected client
+#[derive(Debug)]
 struct Client {
     to_chat_room: TX,
 //    inbox: RX,
